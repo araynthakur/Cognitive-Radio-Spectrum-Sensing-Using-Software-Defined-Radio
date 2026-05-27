@@ -1,0 +1,121 @@
+import numpy as np
+from gnuradio import gr
+import serial
+import time
+
+class blk(gr.sync_block):
+    def __init__(self, threshold=-33.0, tx_port='COM8', rx_port='COM7'):
+        gr.sync_block.__init__(
+            self,
+            name='Cognitive Radio',
+            in_sig=[np.float32],
+            out_sig=[np.float32]
+        )
+        self.threshold     = float(threshold)
+        self.current_state = "FREE"
+        self.counter       = 0
+        self.last_change   = 0
+        self.COOLDOWN      = 3.0
+        self.channel       = 1
+        self.freqs         = ["433.4 MHz", "434.0 MHz", "434.6 MHz"]
+
+        print("="*50)
+        print("  COGNITIVE RADIO - SLIDER CONTROLLED")
+        print("  Move slider RIGHT = BUSY = channel shifts")
+        print("  Move slider LEFT  = FREE = TX resumes")
+        print("="*50)
+
+        try:
+            self.tx = serial.Serial(tx_port, 9600, timeout=1)
+            time.sleep(1.5)
+            self.tx.write(b'FREE\n')
+            print(f"  TX Arduino : CONNECTED {tx_port}")
+        except Exception as e:
+            print(f"  TX Arduino : FAILED {e}")
+            self.tx = None
+
+        try:
+            self.rx = serial.Serial(rx_port, 9600, timeout=1)
+            time.sleep(1.5)
+            self.rx.write(b'FREE\n')
+            print(f"  RX Arduino : CONNECTED {rx_port}")
+        except Exception as e:
+            print(f"  RX Arduino : FAILED {e}")
+            self.rx = None
+
+        print("="*50)
+
+    def set_threshold(self, threshold):
+        self.threshold = float(threshold)
+
+    def send(self, state):
+        for s in [self.tx, self.rx]:
+            if s and s.is_open:
+                try:
+                    s.write((state + '\n').encode())
+                except:
+                    pass
+
+    def work(self, input_items, output_items):
+        power = float(np.mean(input_items[0]))
+
+        if power == 0 or np.isnan(power) or np.isinf(power):
+            output_items[0][:] = input_items[0]
+            return len(output_items[0])
+
+        self.counter += 1
+        now = time.time()
+
+        # Decide state based on slider position
+        if power > self.threshold:
+            new_state = "BUSY"
+        else:
+            new_state = "FREE"
+
+        # Print every 2000 iterations - slow and clean
+        if self.counter % 2000 == 0:
+            ch_name = self.freqs[self.channel - 1]
+            print(f"  PWR={power:.1f} dB | "
+                  f"THR={self.threshold:.1f} dB | "
+                  f"STATE={self.current_state} | "
+                  f"CH{self.channel} {ch_name}")
+
+        # Only change state with cooldown - stops rapid flipping
+        if new_state != self.current_state:
+            if (now - self.last_change) >= self.COOLDOWN:
+                self.current_state = new_state
+                self.last_change   = now
+
+                if new_state == "BUSY":
+                    # Calculate next channel
+                    prev_ch   = self.channel
+                    prev_freq = self.freqs[self.channel - 1]
+                    self.channel = (self.channel % 3) + 1
+                    new_freq  = self.freqs[self.channel - 1]
+
+                    print("\n" + "="*50)
+                    print("  *** PRIMARY USER DETECTED ***")
+                    print(f"  Power   : {power:.1f} dB")
+                    print(f"  Threshold: {self.threshold:.1f} dB")
+                    print(f"  Channel : {prev_ch} ({prev_freq}) - BUSY")
+                    print(f"  Action  : Shifting to CH{self.channel} ({new_freq})")
+                    print(f"  TX LED  : RED ON (stopped transmitting)")
+                    print(f"  RX LED  : RED ON (channel busy)")
+                    print("="*50 + "\n")
+
+                else:
+                    ch_name = self.freqs[self.channel - 1]
+                    print("\n" + "="*50)
+                    print("  *** CHANNEL CLEAR - RESUMING ***")
+                    print(f"  Power   : {power:.1f} dB")
+                    print(f"  Threshold: {self.threshold:.1f} dB")
+                    print(f"  Channel : CH{self.channel} ({ch_name})")
+                    print(f"  Action  : Transmitting on CH{self.channel}")
+                    print(f"  TX LED  : GREEN flashing (transmitting)")
+                    print(f"  RX LED  : BLUE ON + GREEN flashing")
+                    print("="*50 + "\n")
+
+                self.send(new_state)
+
+        output_items[0][:] = input_items[0]
+        return len(output_items[0])
